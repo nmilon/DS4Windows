@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$NoPause
 )
 
@@ -6,7 +6,12 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $script:ExitCode = 0
 $script:RebootRecommended = $false
-$script:InstallDir = Join-Path $env:LOCALAPPDATA "VIIPER"
+# Program Files, not LOCALAPPDATA: the logon task below runs viiper.exe
+# elevated, so the binary must sit somewhere only administrators can write.
+# Using LOCALAPPDATA meant any process running as the user could replace it and
+# gain silent administrator execution at the next sign-in.
+$script:InstallDir = Join-Path $env:ProgramFiles "VIIPER"
+$script:LegacyInstallDir = Join-Path $env:LOCALAPPDATA "VIIPER"
 $script:LogPath = Join-Path $script:InstallDir "install.log"
 $script:TempDir = Join-Path ([IO.Path]::GetTempPath()) (
     "DS4Windows-VIIPER-Setup-" + [Guid]::NewGuid().ToString("N"))
@@ -93,6 +98,39 @@ function ConvertTo-VersionFromObject([object]$value) {
     return $null
 }
 
+# Pinned artifacts. Nothing is executed unless its SHA-256 matches, so a
+# compromised or hijacked release account cannot hand this script a different
+# binary. Bumping a version means deliberately updating the hash next to it:
+# download the asset, run Get-FileHash -Algorithm SHA256, paste the result.
+$script:ViiperVersion = "v0.0.5"
+$script:ViiperUrl =
+    "https://github.com/hbashton/VIIPER/releases/download/v0.0.5/viiper.exe"
+$script:ViiperSha256 =
+    "3AD872D006DF2FC282E381A68B5A5B3C51E4DA3614D250AB3FDA1C272EF745D0"
+$script:UsbipVersion = "0.9.7.7"
+$script:UsbipUrl =
+    "https://github.com/vadimgrn/usbip-win2/releases/download/v.0.9.7.7/USBip-0.9.7.7-x64.exe"
+$script:UsbipSha256 =
+    "51620FA5F9F8BE5932BC9D786DEEE557CE06D5407A99CAB490DCFAC71F185FEA"
+
+# VIIPER defaults both listeners to every interface (":3241" / ":3242"), and its
+# USB/IP port has no authentication at all. Keep both on loopback. This must
+# stay in sync with ViiperSetupManager.ServerArguments.
+$script:ServerArguments =
+    "server --usb.addr 127.0.0.1:3241 --api.addr 127.0.0.1:3242"
+
+function Assert-FileHash([string]$path, [string]$expected, [string]$label) {
+    $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+    if ($actual -ne $expected.ToUpperInvariant()) {
+        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        throw ("$label failed verification and was discarded. Expected SHA-256 " +
+               "$expected but got $actual. Nothing was installed. Do not " +
+               "bypass this check: either the download was corrupted or the " +
+               "published artifact changed.")
+    }
+    Write-SetupLog "$label verified (SHA-256 $actual)." Green
+}
+
 function Invoke-Download([string]$url, [string]$outFile) {
     $lastError = $null
     for ($attempt = 1; $attempt -le 3; $attempt++) {
@@ -116,88 +154,15 @@ function Invoke-Download([string]$url, [string]$outFile) {
     throw "Download failed after three attempts: $($lastError.Message)"
 }
 
-function Get-GithubReleaseAsset([string]$repo, [string]$assetPattern) {
-    $apiUrl = "https://api.github.com/repos/$repo/releases?per_page=20"
-    $releases = Invoke-RestMethod -Uri $apiUrl -TimeoutSec 30 -Headers @{
-        "User-Agent" = "DS4Windows-VIIPER-Setup"
-        "Accept" = "application/vnd.github+json"
-    }
-    if (-not $releases) { throw "No releases were found in $repo." }
-
-    foreach ($release in @($releases | Where-Object { -not $_.draft })) {
-        $asset = @($release.assets) |
-            Where-Object { $_.name -match $assetPattern } |
-            Sort-Object @{ Expression = {
-                if ($_.name -match
-                    '(?i)^viiper-(windows|win)-(amd64|x64)\.zip$') { 0 }
-                elseif ($_.name -match '(?i)^viiper\.exe$') { 1 }
-                elseif ($_.name -match
-                    '(?i)(windows|win).*(amd64|x64).*\.(exe|zip)$') { 2 }
-                elseif ($_.name -match '(?i)\.(exe|zip)$') { 3 }
-                else { 4 }
-            }}, name | Select-Object -First 1
-        if ($asset) {
-            $label = if ($release.tag_name) { $release.tag_name }
-                elseif ($release.name) { $release.name } else { $release.id }
-            Write-SetupLog (
-                "Using '$($asset.name)' from $repo release '$label'.")
-            return $asset.browser_download_url
-        }
-    }
-
-    $names = @($releases | ForEach-Object { $_.assets } |
-        ForEach-Object { $_.name }) -join ", "
-    throw "No supported Windows VIIPER asset was found. Assets seen: $names"
-}
-
-function Get-ViiperAssetUrl {
-    $errors = @()
-    foreach ($repo in @("hbashton/VIIPER")) {
-        try {
-            Write-SetupLog "Checking release assets in $repo"
-            return Get-GithubReleaseAsset $repo (
-                "(?i)^(?!.*(libviiper|client|headers|linux|arm64|\.nupkg|" +
-                "\.crate|\.tgz)).*\.(exe|zip)$")
-        }
-        catch {
-            $errors += "${repo}: $($_.Exception.Message)"
-            Write-SetupLog "Could not use ${repo}: $($_.Exception.Message)" Yellow
-        }
-    }
-    throw "Could not locate VIIPER. $($errors -join '; ')"
-}
-
-function Expand-ViiperAsset([string]$assetUrl, [string]$candidatePath) {
-    $extension = [IO.Path]::GetExtension(([Uri]$assetUrl).AbsolutePath)
-    $downloadPath = Join-Path $script:TempDir ("viiper-download" + $extension)
-    Invoke-Download $assetUrl $downloadPath
-
-    if ($extension -ieq ".exe") {
-        Copy-Item -LiteralPath $downloadPath -Destination $candidatePath -Force
-    }
-    elseif ($extension -ieq ".zip") {
-        $extractDir = Join-Path $script:TempDir "viiper-extract"
-        Expand-Archive -LiteralPath $downloadPath -DestinationPath $extractDir `
-            -Force
-        $executable = Get-ChildItem -LiteralPath $extractDir -Recurse `
-            -Filter "viiper.exe" | Select-Object -First 1
-        if (-not $executable) {
-            throw "The VIIPER archive did not contain viiper.exe."
-        }
-        Copy-Item -LiteralPath $executable.FullName `
-            -Destination $candidatePath -Force
-    }
-    else {
-        throw "Unsupported VIIPER asset type '$extension'."
-    }
-
-    $candidate = Get-Item -LiteralPath $candidatePath
-    if ($candidate.Length -lt 65536) {
-        throw "The downloaded VIIPER executable is unexpectedly small."
-    }
-    if ($candidate.Extension -ine ".exe") {
-        throw "The downloaded VIIPER payload is not a Windows executable."
-    }
+function Get-ViiperAsset([string]$candidatePath) {
+    # The old code asked the GitHub API for the newest non-draft release and ran
+    # whatever *.exe/*.zip it found first, which also picked up prereleases.
+    # Fetch exactly one pinned, hash-verified artifact instead.
+    Write-SetupLog "Fetching VIIPER $script:ViiperVersion (pinned)."
+    $downloadPath = Join-Path $script:TempDir "viiper-download.exe"
+    Invoke-Download $script:ViiperUrl $downloadPath
+    Assert-FileHash $downloadPath $script:ViiperSha256 "VIIPER $script:ViiperVersion"
+    Copy-Item -LiteralPath $downloadPath -Destination $candidatePath -Force
 }
 
 function Install-ViiperAtomically([string]$candidatePath,
@@ -318,7 +283,7 @@ function Test-ViiperApi([int]$timeoutMilliseconds = 1000) {
 
 function Start-AndVerifyViiper([string]$viiperPath) {
     if (Test-ViiperApi) { return $true }
-    Start-Process -FilePath $viiperPath -ArgumentList "server" `
+    Start-Process -FilePath $viiperPath -ArgumentList $script:ServerArguments `
         -WindowStyle Hidden | Out-Null
     for ($attempt = 0; $attempt -lt 10; $attempt++) {
         Start-Sleep -Milliseconds 500
@@ -330,7 +295,7 @@ function Start-AndVerifyViiper([string]$viiperPath) {
 function Register-ViiperRunTask([string]$viiperPath, [string]$taskName) {
     try {
         $taskAction = New-ScheduledTaskAction -Execute $viiperPath `
-            -Argument "server"
+            -Argument $script:ServerArguments
         $taskTrigger = New-ScheduledTaskTrigger -AtLogOn
         $taskPrincipal = New-ScheduledTaskPrincipal `
             -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) `
@@ -350,7 +315,7 @@ function Register-ViiperRunTask([string]$viiperPath, [string]$taskName) {
     }
 
     try {
-        $runCommand = '"{0}" server' -f $viiperPath
+        $runCommand = '"{0}" {1}' -f $viiperPath, $script:ServerArguments
         $scheduledResult = Start-Process -FilePath "schtasks.exe" `
             -ArgumentList "/Create /F /TN `"$taskName`" /SC ONLOGON /RL HIGHEST /IT /TR `"$runCommand`"" `
             -WindowStyle Hidden -PassThru -Wait
@@ -379,7 +344,7 @@ try {
     Write-SetupLog "Installing or repairing VIIPER and usbip-win2."
 
     Write-Step "Checking usbip-win2"
-    $requiredUsbipVersion = [Version]"0.9.7.7"
+    $requiredUsbipVersion = [Version]$script:UsbipVersion
     try {
         $usbipVersion = Get-UsbipInstalledVersion
     }
@@ -393,9 +358,11 @@ try {
     else {
         $state = if ($usbipVersion) { "old ($usbipVersion)" } else { "missing" }
         Write-SetupLog "usbip-win2 is $state; installing $requiredUsbipVersion." Yellow
-        $usbipUrl = "https://github.com/vadimgrn/usbip-win2/releases/download/v.0.9.7.7/USBip-0.9.7.7-x64.exe"
-        $usbipInstaller = Join-Path $script:TempDir "USBip-0.9.7.7-x64.exe"
-        Invoke-Download $usbipUrl $usbipInstaller
+        $usbipInstaller = Join-Path $script:TempDir "USBip-$script:UsbipVersion-x64.exe"
+        Invoke-Download $script:UsbipUrl $usbipInstaller
+        # This installs a kernel-mode driver. Verify before running it.
+        Assert-FileHash $usbipInstaller $script:UsbipSha256 `
+            "usbip-win2 $script:UsbipVersion installer"
         Write-SetupLog "Windows may briefly restart USB hub devices." Yellow
         $installer = Start-Process -FilePath $usbipInstaller `
             -ArgumentList "/S" -PassThru -Wait
@@ -415,7 +382,7 @@ try {
     Write-Step "Installing VIIPER"
     $viiperPath = Join-Path $script:InstallDir "viiper.exe"
     $candidatePath = Join-Path $script:TempDir "viiper.exe"
-    Expand-ViiperAsset (Get-ViiperAssetUrl) $candidatePath
+    Get-ViiperAsset $candidatePath
     Install-ViiperAtomically $candidatePath $viiperPath
     Write-SetupLog "VIIPER installed to $viiperPath" Green
 
@@ -441,6 +408,23 @@ try {
     }
     else {
         Write-SetupLog "Could not create hidden logon task. Setup will continue; VIIPER can still be started by DS4Windows when needed." Yellow
+    }
+
+    # A leftover copy under LOCALAPPDATA is exactly the writable binary this
+    # relocation exists to remove, so clear it out once the new one is in place.
+    if (Test-Path -LiteralPath $script:LegacyInstallDir) {
+        Write-Step "Removing previous user-writable install"
+        try {
+            Stop-ViiperProcesses "legacy cleanup" | Out-Null
+            Remove-Item -LiteralPath $script:LegacyInstallDir -Recurse -Force `
+                -ErrorAction Stop
+            Write-SetupLog "Removed $script:LegacyInstallDir" Green
+        }
+        catch {
+            Write-SetupLog (
+                "Could not remove $script:LegacyInstallDir " +
+                "($($_.Exception.Message)). Delete it manually." ) Yellow
+        }
     }
 
     Write-Step "Verification"
