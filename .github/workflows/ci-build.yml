@@ -26,6 +26,26 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
+      # The setup script runs elevated and installs a kernel driver, so a parse
+      # error there is worse than a compile error. Nothing here executes it.
+      - name: Check PowerShell scripts parse
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem -Path .\extras -Filter *.ps1 -Recurse | ForEach-Object {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName, [ref]$null, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $failed = $true
+              Write-Host "::error file=$($_.FullName)::$($errors.Count) parse error(s)"
+              $errors | ForEach-Object { Write-Host "  $($_.Extent.StartLineNumber): $($_.Message)" }
+            } else {
+              Write-Host "OK $($_.Name)"
+            }
+          }
+          if ($failed) { exit 1 }
+
       - name: Restore dependencies
         run: dotnet restore
 

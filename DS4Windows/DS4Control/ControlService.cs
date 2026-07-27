@@ -128,7 +128,7 @@ namespace DS4Windows
         private DS4State[] oscState = new DS4State[MAX_DS4_CONTROLLER_COUNT];
         public HandleOscPacket oscCallback;
 
-        public UDPListener oscListener;
+        public LoopbackOscListener oscListener;
         public UDPSender oscSender;
 
         void GetPadDetailForIdx(int padIdx, ref DualShockPadMeta meta)
@@ -252,7 +252,7 @@ namespace DS4Windows
             CreateOSCCallback();
 
             SystemEvents.DisplaySettingsChanged += SystemEvents_DisplaySettingsChanged;
-            //oscListener = new UDPListener(Global.getOSCServerPortNum(), callback: oscCallback);
+            //oscListener = new LoopbackOscListener(Global.getOSCServerPortNum(), callback: oscCallback);
             //AppLogger.LogToGui("OSC LISTENER STARTED", false);
         }
 
@@ -316,7 +316,9 @@ namespace DS4Windows
                     AppLogger.LogToGui("Error Receiving OSC Message: " + e.Message, false, true);
                 }
 
-                if (command == null)
+                // Every branch below indexes up to command[4]; a short address
+                // would otherwise throw out of the receive callback.
+                if (command == null || command.Length < 5)
                 {
                     return;
                 }
@@ -1321,7 +1323,7 @@ namespace DS4Windows
         {
             if (state)
             {
-                oscListener = new UDPListener(Global.getOSCServerPortNum(), callback: oscCallback);
+                oscListener = new LoopbackOscListener(Global.getOSCServerPortNum(), callback: oscCallback);
 
                 AppLogger.LogToGui("OSC LISTENER STARTED AT PORT: " + Global.getOSCServerPortNum(), false);
             }

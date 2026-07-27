@@ -69,6 +69,13 @@ namespace DS4Windows
         public const string ViiperReleasesUrl = "https://github.com/hbashton/VIIPER/releases";
 
         private const string InstallerScriptName = "install-viiper-backend.ps1";
+
+        // VIIPER defaults both listeners to every interface (":3241" / ":3242")
+        // and its USB/IP port has no authentication at all, so pin both to
+        // loopback on every launch.
+        public const string ServerArguments =
+            "server --usb.addr 127.0.0.1:3241 --api.addr 127.0.0.1:3242";
+
         private static readonly object serverStartLock = new object();
         private static DateTime lastServerStartAttemptUtc = DateTime.MinValue;
         private static int promptShownThisSession;
@@ -307,10 +314,33 @@ namespace DS4Windows
             }
         }
 
-        private static string GetViiperExePath()
+        // Program Files is writable only by administrators. The logon task runs
+        // this binary elevated, so installing it under LocalAppData let any
+        // process running as the user swap it for silent admin execution.
+        private static string GetProgramFilesViiperExePath()
+        {
+            string programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            return Path.Combine(programFiles, "VIIPER", "viiper.exe");
+        }
+
+        private static string GetLegacyViiperExePath()
         {
             string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             return Path.Combine(localAppData, "VIIPER", "viiper.exe");
+        }
+
+        private static string GetViiperExePath()
+        {
+            string programFilesPath = GetProgramFilesViiperExePath();
+            if (File.Exists(programFilesPath))
+            {
+                return programFilesPath;
+            }
+
+            // Fall back to a pre-existing install so an upgrade keeps working
+            // until Install / Repair relocates it.
+            string legacyPath = GetLegacyViiperExePath();
+            return File.Exists(legacyPath) ? legacyPath : programFilesPath;
         }
 
         private static string GetSetupScriptPath()
@@ -345,7 +375,7 @@ namespace DS4Windows
                 ProcessStartInfo startInfo = new ProcessStartInfo
                 {
                     FileName = viiperPath,
-                    Arguments = "server",
+                    Arguments = ServerArguments,
                     CreateNoWindow = true,
                     WindowStyle = ProcessWindowStyle.Hidden,
                     UseShellExecute = false,
