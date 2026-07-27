@@ -13,6 +13,13 @@ Jays2Kings, Ryochan7, Schmaldeo, and the wider DS4Windows community.
 This is the hbashton fork. Downloads, update checks, bug reports, and VIIPER
 integration documented here all refer to hbashton repositories.
 
+> **This checkout is a personal security-hardened fork of hbashton/DS4Windows.**
+> Network listeners are pinned to loopback, the VIIPER and usbip-win2 downloads
+> are verified against pinned SHA-256 hashes before they run, the elevated logon
+> task no longer points at a user-writable binary, and there is an uninstall
+> script. See [HARDENING.md](HARDENING.md). Report bugs here, not upstream,
+> unless you have reproduced them on an unmodified build.
+
 ## Download and install
 
 ### Stable release
