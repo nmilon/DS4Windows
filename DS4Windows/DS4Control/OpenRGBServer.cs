@@ -40,6 +40,7 @@ namespace DS4WinWPF.DS4Control
 
         private const int PROTOCOL_VERSION = 4;
         private const int MAX_SLOTS = Global.MAX_DS4_CONTROLLER_COUNT;
+        private const uint MAX_PACKET_DATA_SIZE = 64 * 1024;
 
         private readonly DS4Color[] pendingColors  = new DS4Color[MAX_SLOTS];
         private readonly bool[]     hasPendingColor = new bool[MAX_SLOTS];
@@ -57,7 +58,9 @@ namespace DS4WinWPF.DS4Control
             if (running) Stop();
             try
             {
-                listener = new TcpListener(IPAddress.Any, port);
+                // Loopback only: the SDK protocol is unauthenticated, so it must
+                // not be reachable from the LAN.
+                listener = new TcpListener(IPAddress.Loopback, port);
                 listener.Start();
                 running = true;
                 new Thread(AcceptLoop) { IsBackground = true, Name = "OpenRGBServerAccept" }.Start();
@@ -140,6 +143,10 @@ namespace DS4WinWPF.DS4Control
                     uint devIdx   = BitConverter.ToUInt32(header, 4);
                     uint pktId    = BitConverter.ToUInt32(header, 8);
                     uint dataSize = BitConverter.ToUInt32(header, 12);
+
+                    // Cap the wire-supplied length: an unchecked uint here casts
+                    // negative and drives an unbounded allocation.
+                    if (dataSize > MAX_PACKET_DATA_SIZE) break;
 
                     byte[] payload = dataSize > 0 ? ReadExact(stream, (int)dataSize) : Array.Empty<byte>();
                     if (payload == null) break;
