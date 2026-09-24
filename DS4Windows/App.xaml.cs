@@ -864,21 +864,51 @@ namespace DS4WinWPF
         {
             Logger logger = logHolder.Logger;
             logger.Info("User Session Ending");
-            CleanShutdown(sessionEnding: true);
+            SessionEndExit();
         }
 
-        private void CleanShutdown(bool sessionEnding = false)
+        /// <summary>
+        /// Windows is ending the session. It has already killed viiper.exe and
+        /// will reclaim every handle, virtual USB/IP device and audio stream
+        /// itself. A full Stop here raced live native threads (HID overlapped
+        /// reads, audio, VIIPER) and either overran Windows' shutdown deadline
+        /// or crashed with an access violation, so save state and terminate
+        /// without running any teardown.
+        /// </summary>
+        private void SessionEndExit()
+        {
+            if (!runShutdown)
+            {
+                return;
+            }
+
+            Logger logger = logHolder.Logger;
+            try
+            {
+                rootHub?.SaveForSessionEnd();
+                if (!skipSave)
+                {
+                    DS4Windows.Global.Save();
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.Warn($"Could not save settings at session end: {ex.Message}");
+            }
+
+            logger.Info("Session end: settings saved, terminating without teardown");
+            LogManager.Flush(TimeSpan.FromSeconds(1));
+            LogManager.Shutdown();
+            Process.GetCurrentProcess().Kill();
+        }
+
+        private void CleanShutdown()
         {
             if (runShutdown)
             {
                 bool shutdownTimedOut = false;
                 if (rootHub != null)
                 {
-                    if (sessionEnding)
-                    {
-                        rootHub.PrepareSessionEnd();
-                    }
-
                     Task shutdownTask = Task.Run(() =>
                     {
                         if (rootHub.running)
@@ -889,10 +919,7 @@ namespace DS4WinWPF
                         rootHub.ShutDown();
                     });
 
-                    // Windows flags apps still running ~5 s into shutdown as
-                    // blocking it, so stay well under that when the session ends.
-                    TimeSpan stopTimeout = TimeSpan.FromSeconds(sessionEnding ? 3 : 8);
-                    if (!shutdownTask.Wait(stopTimeout))
+                    if (!shutdownTask.Wait(TimeSpan.FromSeconds(8)))
                     {
                         shutdownTimedOut = true;
                         try
@@ -916,7 +943,7 @@ namespace DS4WinWPF
                 if (threadComEvent != null)
                 {
                     threadComEvent.Set();  // signal the other instance.
-                    if (testThread != null && !testThread.Join(sessionEnding ? 500 : 2000))
+                    if (testThread != null && !testThread.Join(2000))
                     {
                         shutdownTimedOut = true;
                         logHolder?.Logger?.Warn("Timed out waiting for single-instance worker thread to exit.");

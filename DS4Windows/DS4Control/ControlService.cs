@@ -1070,11 +1070,9 @@ namespace DS4Windows
             return true;
         }
 
-        private volatile bool keepHidHideEntriesOnRelease;
-
         private void ReleaseHidHideManagedDevices()
         {
-            if (!Global.hidHideInstalled || keepHidHideEntriesOnRelease) return;
+            if (!Global.hidHideInstalled) return;
 
             List<string> sessionIds;
             List<string> persistentIds;
@@ -1887,18 +1885,17 @@ namespace DS4Windows
         }
 
         /// <summary>
-        /// Windows is ending the session: skip VIIPER teardown work that can
-        /// only time out, and leave managed controllers in HidHide's blacklist.
-        /// Keeping the entry means no other process (Windows GameInput, Steam,
-        /// ...) can open the controller when it connects after the next boot,
-        /// so the exclusive open succeeds without the elevated re-enable
-        /// fallback and its UAC prompt. The entry is adopted again on connect
-        /// and released on a normal exit.
+        /// Persist what ShutDown would, without tearing anything down. Used when
+        /// Windows ends the session and the process is terminated right after.
+        /// Managed controllers stay in HidHide's blacklist, so no other process
+        /// (Windows GameInput, Steam, ...) can open the controller when it
+        /// connects after the next boot; the exclusive open then succeeds
+        /// without the elevated re-enable fallback and its UAC prompt. The
+        /// entry is adopted again on connect and released on a normal exit.
         /// </summary>
-        public void PrepareSessionEnd()
+        public void SaveForSessionEnd()
         {
-            ViiperOutDevice.SessionEnding = true;
-            keepHidHideEntriesOnRelease = true;
+            OutputSlotPersist.WriteConfig(outputslotMan);
         }
 
         public void PrepareAbort()
