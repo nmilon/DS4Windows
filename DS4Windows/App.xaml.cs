@@ -864,16 +864,21 @@ namespace DS4WinWPF
         {
             Logger logger = logHolder.Logger;
             logger.Info("User Session Ending");
-            CleanShutdown();
+            CleanShutdown(sessionEnding: true);
         }
 
-        private void CleanShutdown()
+        private void CleanShutdown(bool sessionEnding = false)
         {
             if (runShutdown)
             {
                 bool shutdownTimedOut = false;
                 if (rootHub != null)
                 {
+                    if (sessionEnding)
+                    {
+                        rootHub.PrepareSessionEnd();
+                    }
+
                     Task shutdownTask = Task.Run(() =>
                     {
                         if (rootHub.running)
@@ -884,7 +889,10 @@ namespace DS4WinWPF
                         rootHub.ShutDown();
                     });
 
-                    if (!shutdownTask.Wait(TimeSpan.FromSeconds(8)))
+                    // Windows flags apps still running ~5 s into shutdown as
+                    // blocking it, so stay well under that when the session ends.
+                    TimeSpan stopTimeout = TimeSpan.FromSeconds(sessionEnding ? 3 : 8);
+                    if (!shutdownTask.Wait(stopTimeout))
                     {
                         shutdownTimedOut = true;
                         try
@@ -908,7 +916,7 @@ namespace DS4WinWPF
                 if (threadComEvent != null)
                 {
                     threadComEvent.Set();  // signal the other instance.
-                    if (testThread != null && !testThread.Join(2000))
+                    if (testThread != null && !testThread.Join(sessionEnding ? 500 : 2000))
                     {
                         shutdownTimedOut = true;
                         logHolder?.Logger?.Warn("Timed out waiting for single-instance worker thread to exit.");

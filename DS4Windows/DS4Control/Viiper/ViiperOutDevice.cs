@@ -262,6 +262,13 @@ namespace DS4Windows
         private short dualShock4ResamplePreviousSample;
         private bool dualShock4ResamplePreviousSampleKnown;
         private volatile bool writerStopRequested;
+
+        // Set when Windows is ending the session. By then Windows has already
+        // killed viiper.exe, so every reconnect, API call and usbip.exe run
+        // only burns seconds (a refused loopback connect alone takes ~2 s) and
+        // keeps DS4Windows from exiting before Windows' shutdown deadline.
+        // The virtual devices disappear with the session anyway.
+        public static volatile bool SessionEnding;
         private volatile bool feedbackDispatchStopRequested = true;
         private bool activeStreamUsesFramedProtocol;
         private bool activeStreamSupportsMicrophone;
@@ -2034,7 +2041,7 @@ namespace DS4Windows
         private bool TryRecoverStream(string reason, long failedStreamGeneration,
             byte[] packetToRetry = null)
         {
-            if (writerStopRequested || !connected)
+            if (writerStopRequested || !connected || SessionEnding)
             {
                 return false;
             }
@@ -2166,7 +2173,7 @@ namespace DS4Windows
             int remaining = milliseconds;
             while (remaining > 0)
             {
-                if (writerStopRequested || !connected)
+                if (writerStopRequested || !connected || SessionEnding)
                 {
                     return false;
                 }
@@ -4848,6 +4855,11 @@ namespace DS4Windows
 
         private TcpClient Connect(int receiveTimeout)
         {
+            if (ViiperOutDevice.SessionEnding)
+            {
+                throw new IOException("VIIPER is unavailable while Windows is ending the session.");
+            }
+
             TcpClient tcp = new TcpClient
             {
                 NoDelay = true,
@@ -5176,6 +5188,12 @@ namespace DS4Windows
         {
             output = string.Empty;
             error = string.Empty;
+            if (ViiperOutDevice.SessionEnding)
+            {
+                error = "skipped while Windows is ending the session.";
+                return false;
+            }
+
             string usbipPath = FindUsbipPath();
             if (string.IsNullOrEmpty(usbipPath))
             {
