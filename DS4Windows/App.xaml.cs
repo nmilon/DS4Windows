@@ -91,6 +91,9 @@ namespace DS4WinWPF
             runShutdown = true;
             skipSave = true;
 
+            DS4Windows.NativeCrashGuard.Install(
+                e.Args.Length > 0 && e.Args[0].StartsWith("--") ? e.Args[0] : "main");
+
             if (DS4Windows.InputDevices.DualSenseBluetoothAudioPacer.
                 TryRunHelper(e.Args))
             {
