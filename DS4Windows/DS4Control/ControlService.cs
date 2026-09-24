@@ -755,6 +755,7 @@ namespace DS4Windows
         private void DS4Devices_RequestElevation(RequestElevationArgs args)
         {
             // Launches an elevated child process to re-enable device
+            LogDebug($"Exclusive open failed for {args.InstanceId}; another process holds the controller. Requesting elevation to re-enable it.", true);
             ProcessStartInfo startInfo =
                 new ProcessStartInfo(Global.exelocation);
             startInfo.Verb = "runas";
@@ -1069,9 +1070,11 @@ namespace DS4Windows
             return true;
         }
 
+        private volatile bool keepHidHideEntriesOnRelease;
+
         private void ReleaseHidHideManagedDevices()
         {
-            if (!Global.hidHideInstalled) return;
+            if (!Global.hidHideInstalled || keepHidHideEntriesOnRelease) return;
 
             List<string> sessionIds;
             List<string> persistentIds;
@@ -1881,6 +1884,21 @@ namespace DS4Windows
                 // for presence of flag and remove the device then
                 device.ReadyQuickChargeDisconnect = true;
             }
+        }
+
+        /// <summary>
+        /// Windows is ending the session: skip VIIPER teardown work that can
+        /// only time out, and leave managed controllers in HidHide's blacklist.
+        /// Keeping the entry means no other process (Windows GameInput, Steam,
+        /// ...) can open the controller when it connects after the next boot,
+        /// so the exclusive open succeeds without the elevated re-enable
+        /// fallback and its UAC prompt. The entry is adopted again on connect
+        /// and released on a normal exit.
+        /// </summary>
+        public void PrepareSessionEnd()
+        {
+            ViiperOutDevice.SessionEnding = true;
+            keepHidHideEntriesOnRelease = true;
         }
 
         public void PrepareAbort()
